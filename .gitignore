@@ -1,0 +1,48 @@
+# 编译/临时文件
+*.o
+*.obj
+*.so
+*.dll
+*.exe
+*.out
+*.a
+*.pyc
+*.pyo
+*.pyd
+__pycache__/
+
+# 虚拟环境
+.venv/
+venv/
+env/
+ENV/
+
+# IDE / 编辑器配置
+.vscode/
+.idea/
+*.swp
+*.swo
+*.iml
+
+# 日志 / 缓存
+*.log
+*.tmp
+*.cache
+.cache/
+logs/
+*.pid
+
+# 数据文件（可根据需要调整）
+*.csv
+*.tsv
+*.dat
+*.db
+*.sqlite
+*.h5
+
+# Jupyter Notebook 检查点
+.ipynb_checkpoints/
+
+# 系统文件
+.DS_Store
+Thumbs.db
