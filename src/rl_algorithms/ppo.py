@@ -146,4 +146,5 @@ if __name__ == "__main__":
     env = gym.make("CartPole-v1")
     state_dim, action_dim = env.observation_space.shape[0], env.action_space.n
     model = ActorCritic(state_dim, action_dim).to(device)
-    train(env, model, 500, 1000)
+    train(env, model, 512, 100)
+    # torch.save(model.state_dict(), "./model_parameters/ppo.pt")

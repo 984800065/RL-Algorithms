@@ -46,3 +46,6 @@ logs/
 # 系统文件
 .DS_Store
 Thumbs.db
+
+# 模型参数
+model_parameters/*
