@@ -1,9 +1,10 @@
 import gymnasium as gym
 import torch
 from torch import nn
+import os
 
 
-device = torch.device("cuda:2" if torch.cuda.is_available() else "cpu")
+device = torch.device("cuda:7" if torch.cuda.is_available() else "cpu")
 
 
 class ActorCritic(nn.Module):
@@ -147,4 +148,6 @@ if __name__ == "__main__":
     state_dim, action_dim = env.observation_space.shape[0], env.action_space.n
     model = ActorCritic(state_dim, action_dim).to(device)
     train(env, model, 512, 100)
-    # torch.save(model.state_dict(), "./model_parameters/ppo.pt")
+    if not os.path.exists("./model_parameters"):
+        os.makedirs("./model_parameters")
+    torch.save(model.state_dict(), "./model_parameters/ppo.pt")

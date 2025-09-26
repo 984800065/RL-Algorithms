@@ -1,10 +1,17 @@
 import gymnasium as gym
 import torch
+import sys
+import numpy as np
 from torch import nn
 from tqdm import tqdm
-import numpy as np
-import os
+from loguru import logger
 
+logger.remove()
+logger.add(
+    sys.stderr,
+    format="<green>{time:YYYY-MM-DD HH:mm:ss}</green> | <level>{level}</level> | <cyan>{file.path}</cyan>:<cyan>{line}</cyan>:<cyan>{function}</cyan> | <level>{message}</level>"
+)
+logger.info("logger has been initialized")
 
 G = 32
 device = torch.device("cuda:7" if torch.cuda.is_available() else "cpu")
@@ -31,9 +38,10 @@ def get_group_process_advantages(group_rewards: torch.Tensor, group_masks: torch
     r_std = group_rewards.std()
     advantages_uncumsumed = (group_rewards - r_mean) / (r_std + 1e-8) * group_masks
     advantages = torch.flip(torch.cumsum(torch.flip(advantages_uncumsumed, dims=(1,)), dim=1), dims=(1,))
+    # advantages = (group_rewards - r_mean) / (r_std + 1e-8) * group_masks
     return advantages
 
-def grpo_update(
+def gspo_update(
     model: ActorCritic,
     optimizer: torch.optim.Optimizer,
     group_states: torch.Tensor,
@@ -45,7 +53,8 @@ def grpo_update(
     minibatch_size: int = 512,
     beta: float = 0.01,
     entropy_coef: float = 0.01,
-    clip_epsilon: float = 0.2
+    clip_epsilon_low: float = 3e-4,
+    clip_epsilon_high: float = 4e-4
 ):
     advantages_mean = group_advantages.sum() / group_masks.sum()
     advantages_std = torch.sqrt(((group_advantages - advantages_mean) * group_masks).pow(2).sum() / group_masks.sum())
@@ -54,31 +63,39 @@ def grpo_update(
     model.train()
     G = group_states.shape[0]
     for epoch in range(update_epochs):
-        ref_group_log_probs = old_group_log_probs.clone()
+        group_log_probs = torch.zeros_like(old_group_log_probs, dtype=torch.float, device=device)
         for g in range(G):
             for begin_idx in range(0, int(group_masks[g].sum()), minibatch_size):
                 end_idx = begin_idx + minibatch_size
                 batch_idx = slice(begin_idx, end_idx)
-                
+
                 probs: torch.Tensor = model(group_states[g, batch_idx])
                 dis = torch.distributions.Categorical(probs)
                 log_probs = dis.log_prob(group_actions[g, batch_idx])
-                entropy = dis.entropy().mean()
-                ratio = torch.exp(log_probs - old_group_log_probs[g, batch_idx])
+                group_log_probs[g, batch_idx] = log_probs
+        
+        negative_approx_kl = group_log_probs - old_group_log_probs
+        seq_lengths = torch.sum(group_masks, dim=-1).clamp(min=1)
+        negative_approx_kl_seq = torch.sum(negative_approx_kl * group_masks, dim=-1) / seq_lengths
 
-                clip_loss = -torch.min(
-                    ratio * group_advantages[g, batch_idx], 
-                    torch.clamp(ratio, 1.0 - clip_epsilon, 1.0 + clip_epsilon) * group_advantages[g, batch_idx]
-                ).mean()
-                ref_ratio = torch.exp(ref_group_log_probs[g, batch_idx] - log_probs)
-                KL_loss = beta * (ref_ratio - torch.log(ref_ratio) - 1).mean()
-                entropy_bonus = -entropy_coef * entropy
-                loss = clip_loss + KL_loss + entropy_bonus
-                loss /= G
+        log_seq_importance_ratio = group_log_probs - group_log_probs.detach() + negative_approx_kl_seq.detach().unsqueeze(-1)
+        log_seq_importance_ratio = torch.clamp(log_seq_importance_ratio, max=10)
 
-                optimizer.zero_grad()
-                loss.backward()
-                optimizer.step()
+        seq_importance_ratio = torch.exp(log_seq_importance_ratio)
+
+        pg_losses1 = group_advantages * seq_importance_ratio
+        pg_losses2 = group_advantages * torch.clamp(seq_importance_ratio, 1 - clip_epsilon_low, 1 + clip_epsilon_high)
+        pg_losses = -torch.minimum(pg_losses1, pg_losses2)
+        pg_loss_seq_sum = (pg_losses * group_masks).sum(dim=-1)
+        pg_loss_seq_len = group_masks.sum(dim=-1).clamp(min=1)
+        pg_loss_seq_mean = pg_loss_seq_sum / pg_loss_seq_len
+        pg_loss = pg_loss_seq_mean.mean()
+
+        # logger.info(f"pg_loss.shape: {pg_loss.shape}")
+
+        optimizer.zero_grad()
+        pg_loss.backward()
+        optimizer.step()
                 
 def train(
     vec_env: gym.Env, 
@@ -131,7 +148,7 @@ def train(
         group_masks[zero_after] = 0
         group_advantages = get_group_process_advantages(group_rewards, group_masks)
 
-        grpo_update(model, optimizer, group_states, group_actions, group_log_probs, group_advantages, group_masks)
+        gspo_update(model, optimizer, group_states, group_actions, group_log_probs, group_advantages, group_masks)
 
         # print(f"Episode {episode + 1}, Reward: {avg_reward}")
         pbar.set_postfix(group_reward=group_rewards.sum() / G)
@@ -141,7 +158,5 @@ if __name__ == "__main__":
     vec_env = gym.make_vec("CartPole-v1", num_envs=G)
     state_dim, action_dim = vec_env.observation_space.shape[1], vec_env.action_space[0].n
     model = ActorCritic(state_dim, action_dim).to(device)
+    # model.load_state_dict(torch.load("./model_parameters/grpo.pt"))
     train(vec_env, model, state_dim)
-    if not os.path.exists("./model_parameters"):
-        os.makedirs("./model_parameters")
-    torch.save(model.state_dict(), "./model_parameters/grpo.pt")
